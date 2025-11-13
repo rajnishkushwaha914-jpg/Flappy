@@ -1,0 +1,540 @@
+<!doctype html>
+<html lang="hi">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Flappy Deluxe — Missions & Replay</title>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg1:#071426; --bg2:#0b2a44; --accent:#00d4ff;
+  }
+  *{box-sizing:border-box;font-family:'Poppins',system-ui,-apple-system,Segoe UI,Roboto}
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:linear-gradient(180deg,var(--bg1),var(--bg2));color:#e6f7ff;padding:18px}
+  .wrap{width:100%;max-width:980px}
+  header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+  .title{font-weight:700;font-size:1.05rem}
+  .hud{display:flex;gap:12px;align-items:center}
+  .badge{background:rgba(255,255,255,0.04);padding:8px 12px;border-radius:10px;font-weight:700}
+
+  .stage{position:relative;width:100%;padding-top:56%;overflow:hidden;border-radius:14px;background:
+    linear-gradient(180deg,#9ad6ff 0%, #1b2740 60%); box-shadow: 0 14px 50px rgba(2,6,23,0.7)}
+  canvas{position:absolute;left:0;top:0;width:100%;height:100%;display:block}
+
+  .controls{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+  button, select{padding:10px 12px;border-radius:10px;border:none;background:linear-gradient(90deg,#00c6ff,#0072ff);color:#002;font-weight:700;cursor:pointer}
+  .muted{color:rgba(0,0,0,0.6);font-weight:700}
+
+  .small{font-size:0.95rem;color:#fff;opacity:0.95}
+  .panel{margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .panel button.secondary{background:transparent;color:#fff;border:1px solid rgba(255,255,255,0.08);box-shadow:none}
+
+  .overlay{position:absolute;left:0;top:0;right:0;bottom:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none}
+  .big{font-size:2rem;font-weight:800;text-shadow:0 8px 30px rgba(0,0,0,0.5)}
+  .smallmuted{font-size:1rem;color:rgba(255,255,255,0.9);opacity:0.95}
+  footer{margin-top:10px;color:rgba(255,255,255,0.6);font-size:0.9rem}
+  @media(max-width:520px){ .big{font-size:1.4rem} .stage{padding-top:72%} }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="title">Flappy Deluxe — Missions & Replay</div>
+      <div class="hud">
+        <div class="badge">Score: <span id="score">0</span></div>
+        <div class="badge">Coins: <span id="coins">0</span></div>
+        <div class="badge">Best: <span id="best">0</span></div>
+      </div>
+    </header>
+
+    <div class="stage" id="stage" aria-label="Game area">
+      <canvas id="game"></canvas>
+      <div class="overlay" id="overlay">
+        <div class="big">Tap / Space to Start</div>
+        <div class="smallmuted">Collect coins to complete missions. Press S to save replay. Press P to play replay.</div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button id="pauseBtn">Pause</button>
+      <button id="restartBtn">Restart</button>
+      <button id="muteBtn">Mute</button>
+
+      <div style="margin-left:auto" class="small">Mission: Collect <strong id="missionTarget">3</strong> coins this run</div>
+    </div>
+
+    <div class="panel">
+      <button id="saveReplay" class="secondary">⬇ Save Replay (JSON)</button>
+      <button id="playReplay" class="secondary">▶ Play Replay</button>
+      <button id="downloadImage" class="secondary">📸 Share / Save Score Image</button>
+    </div>
+
+    <footer>Use Share button to generate an image of the final run (works with mobile share API where available).</footer>
+  </div>
+
+<script>
+/* Flappy Deluxe — Missions & Replay (single file)
+   Features added:
+   - Coins spawn in gaps (collect for mission)
+   - Missions / Levels: target coins per run. level increases after success.
+   - Records replay: flap timestamps & events; download JSON.
+   - Play Replay: load last recorded replay and play it.
+   - Share/save image: capture canvas + overlay and download/share.
+   - Basic instructions for APK wrappers provided below (in comments).
+*/
+
+(() => {
+  // Canvas & sizing
+  const canvas = document.getElementById('game');
+  const stage = document.getElementById('stage');
+  const overlay = document.getElementById('overlay');
+  function resizeCanvas(){ canvas.width = stage.clientWidth; canvas.height = stage.clientHeight; }
+  window.addEventListener('resize', resizeCanvas);
+  resizeCanvas();
+  const ctx = canvas.getContext('2d');
+
+  // HUD
+  const scoreEl = document.getElementById('score');
+  const coinsEl = document.getElementById('coins');
+  const bestEl = document.getElementById('best');
+  const missionTargetEl = document.getElementById('missionTarget');
+
+  // Buttons
+  const pauseBtn = document.getElementById('pauseBtn');
+  const restartBtn = document.getElementById('restartBtn');
+  const muteBtn = document.getElementById('muteBtn');
+  const saveReplayBtn = document.getElementById('saveReplay');
+  const playReplayBtn = document.getElementById('playReplay');
+  const downloadImageBtn = document.getElementById('downloadImage');
+
+  // State
+  let running=false, paused=false, muted=false;
+  let lastTime=0;
+  let score=0, best=Number(localStorage.getItem('flappy_best')||0);
+  bestEl.textContent = best;
+
+  // mission & level
+  let level = Number(localStorage.getItem('flappy_level')||1);
+  let missionTarget = Math.min(3 + level - 1, 10); // simple growth
+  missionTargetEl.textContent = missionTarget;
+
+  // Bird physics (normalized 0..1 coords)
+  const bird = { x: 0.28, y:0.5, vy:0, radius:0.035 };
+  const gravity = 0.0018;
+  const flapImpulse = -0.45;
+  const maxFallSpeed = 1.2;
+
+  // Pipes & coins
+  let pipes = []; // {x,gapY,gapH,passed,coinCollected}
+  const pipeGapBase = 0.30;
+  const pipeWidth = 0.14;
+  let pipeSpawnTimer = 0;
+  let spawnInterval = 1400;
+  let speedBase = 0.00045;
+  let difficulty = 1;
+
+  // coins in world keep positions and states
+  let coins = []; // {x,y, rNormalized, collected, id}
+  let coinIdCounter = 1;
+  let coinsCollectedThisRun = 0;
+
+  // replay recording: record flap events (time offset from run start), and end state
+  let replay = { events: [], meta: {} };
+  let recording = false;
+  let runStartTime = 0;
+
+  // saved lastReplay for playback in-browser
+  let lastReplayJSON = null;
+
+  // audio
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  const audioCtx = AudioCtx ? new AudioCtx() : null;
+  function sfx(freq=440, type='sine', dur=0.06, vol=0.01){
+    if(!audioCtx || muted) return;
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    o.type = type; o.frequency.value = freq;
+    g.gain.value = vol;
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start();
+    g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + dur);
+    o.stop(audioCtx.currentTime + dur + 0.02);
+  }
+  function sfxFlap(){ sfx(900,'sine',0.06,0.02); }
+  function sfxScore(){ sfx(1200,'triangle',0.09,0.02); }
+  function sfxHit(){ sfx(160,'sawtooth',0.3,0.03); }
+  function sfxCoin(){ sfx(1400,'sine',0.08,0.015); }
+
+  // input & controls
+  function flap(){
+    if(!running){
+      startGame();
+      return;
+    }
+    if(paused) return;
+    bird.vy = flapImpulse;
+    sfxFlap();
+    if(recording){
+      replay.events.push({type:'flap', t: performance.now() - runStartTime});
+    }
+  }
+  window.addEventListener('keydown', e=>{
+    if(e.code === 'Space'){ e.preventDefault(); flap(); }
+    if(e.key==='p' || e.key==='P') togglePause();
+    if(e.key==='s' || e.key==='S') downloadReplayJSON();
+    if(e.key==='r' || e.key==='R') { resetGame(); startGame(); }
+  });
+  stage.addEventListener('pointerdown', ()=> flap());
+
+  pauseBtn.addEventListener('click', togglePause);
+  restartBtn.addEventListener('click', ()=>{ resetGame(); startGame(); });
+  muteBtn.addEventListener('click', ()=> { muted = !muted; muteBtn.textContent = muted ? 'Unmute' : 'Mute'; });
+
+  // replay buttons
+  saveReplayBtn.addEventListener('click', ()=> downloadReplayJSON());
+  playReplayBtn.addEventListener('click', ()=> playLastReplay());
+
+  // share image
+  downloadImageBtn.addEventListener('click', () => {
+    generateScoreImageAndShare();
+  });
+
+  // start/reset/spawn
+  function startGame(){
+    running = true; paused=false; overlay.style.display='none';
+    lastTime = performance.now();
+    bird.x = 0.28; bird.y = 0.5; bird.vy = 0;
+    score = 0; coinsCollectedThisRun = 0; scoreEl.textContent = score; coinsEl.textContent = coinsCollectedThisRun;
+    pipes = []; coins = []; pipeSpawnTimer = 0; difficulty = Math.max(1, level*0.2);
+    spawnInterval = Math.max(900, 1400 - difficulty*30);
+    spawnPipe();
+    // begin recording
+    recording = true; replay = {events: [], meta:{level, missionTarget, startedAt: new Date().toISOString()}};
+    runStartTime = performance.now();
+    requestAnimationFrame(loop);
+  }
+
+  function resetGame(){
+    running = false; paused=false; overlay.style.display='flex';
+    overlay.innerHTML = `<div class="big">Tap / Space to Start</div><div class="smallmuted">Mission: collect ${missionTarget} coins this run</div>`;
+  }
+
+  function togglePause(){
+    if(!running) return;
+    paused = !paused;
+    pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+    if(!paused) requestAnimationFrame(loop);
+  }
+
+  // spawn pipe + coin placement
+  function spawnPipe(){
+    const gapScale = pipeGapBase * Math.max(0.7, 1 - difficulty*0.03);
+    const gapH = gapScale;
+    const minY = gapH/2 + 0.08;
+    const maxY = 1 - gapH/2 - 0.08;
+    const gapY = Math.random()*(maxY-minY) + minY;
+    pipes.push({ x: 1 + pipeWidth, gapY, gapH, passed:false, coinCollected:false });
+    // spawn a coin roughly in the center of the gap sometimes
+    if(Math.random() < 0.85){ // high chance coin exists
+      const coinX = 1 + pipeWidth - 0.02; // slightly behind pipe leading edge
+      const coinY = gapY; // center of gap
+      coins.push({ id: coinIdCounter++, x: coinX, y: coinY, r: 0.03, collected:false });
+    }
+  }
+
+  // update loop
+  function update(dt){
+    if(!running || paused) return;
+    // physics
+    bird.vy += gravity * dt;
+    bird.vy = Math.min(bird.vy, maxFallSpeed);
+    bird.y += bird.vy * dt * 0.001;
+
+    const move = speedBase * dt * (1 + difficulty*0.06);
+    for(const p of pipes) p.x -= move;
+    for(const c of coins) c.x -= move;
+
+    pipeSpawnTimer += dt;
+    if(pipeSpawnTimer > spawnInterval){
+      pipeSpawnTimer = 0;
+      spawnPipe();
+      difficulty += 0.02;
+      spawnInterval = Math.max(800, 1400 - difficulty*20);
+    }
+
+    // remove offscreen
+    if(pipes.length && pipes[0].x < -pipeWidth-0.2) pipes.shift();
+    coins = coins.filter(c => c.x > -0.2 && !c.toRemove);
+
+    // ground/ceiling collision
+    if(bird.y - bird.radius < 0 || bird.y + bird.radius > 1){
+      gameOver();
+      return;
+    }
+
+    // collision with pipes
+    for(const p of pipes){
+      if(bird.x + bird.radius > p.x - pipeWidth/2 && bird.x - bird.radius < p.x + pipeWidth/2){
+        const topLimit = p.gapY - p.gapH/2;
+        const bottomLimit = p.gapY + p.gapH/2;
+        if(bird.y < topLimit || bird.y > bottomLimit){
+          gameOver(); return;
+        }
+      }
+      // scoring when pass pipe center
+      if(!p.passed && p.x + pipeWidth/2 < bird.x){
+        p.passed = true;
+        score += 1;
+        scoreEl.textContent = score;
+        sfxScore();
+      }
+    }
+
+    // coin collection
+    for(const c of coins){
+      if(!c.collected){
+        const dx = (c.x - bird.x);
+        const dy = (c.y - bird.y);
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        if(dist < (c.r + bird.radius) ){
+          c.collected = true;
+          coinsCollectedThisRun++;
+          coinsEl.textContent = coinsCollectedThisRun;
+          sfxCoin();
+          // mark coin for removal after small time
+          c.toRemove = true;
+        }
+      }
+    }
+
+    // mission check: if collected enough coins and still alive -> level up on win
+    if(coinsCollectedThisRun >= missionTarget){
+      // player completed mission but must also survive this run; we treat current run as success if they reach mission and pass next pipe or survive till end of run
+      // simpler: award level-up immediately
+      rewardLevelUp();
+    }
+  }
+
+  function rewardLevelUp(){
+    // increase level, store, and mark as successful run
+    level = Math.min(99, level + 1);
+    localStorage.setItem('flappy_level', String(level));
+    // small visual reward and stop current run
+    stopAndCelebrate();
+  }
+
+  function stopAndCelebrate(){
+    stopRecordingAndSaveMeta();
+    // show overlay with success
+    running = false;
+    overlay.style.display = 'flex';
+    overlay.innerHTML = `<div class="big">Mission Complete!</div><div class="smallmuted">You collected ${coinsCollectedThisRun} coins • Level up to ${level}</div>`;
+    localStorage.setItem('flappy_best', String(Math.max(best, score)));
+    best = Math.max(best, score);
+    bestEl.textContent = best;
+  }
+
+  function gameOver(){
+    sfxHit();
+    running = false;
+    overlay.style.display = 'flex';
+    if(score > best) { best = score; localStorage.setItem('flappy_best', String(best)); bestEl.textContent = best; }
+    overlay.innerHTML = `<div class="big">Game Over</div><div class="smallmuted">Score: ${score} • Coins: ${coinsCollectedThisRun} • Level: ${level}</div>`;
+    stopRecordingAndSaveMeta();
+  }
+
+  function stopRecordingAndSaveMeta(){
+    recording = false;
+    replay.meta.endedAt = new Date().toISOString();
+    replay.meta.score = score;
+    replay.meta.coins = coinsCollectedThisRun;
+    replay.meta.level = level;
+    replay.meta.durationMs = performance.now() - runStartTime;
+    lastReplayJSON = JSON.stringify(replay, null, 2);
+  }
+
+  // draw
+  function draw(){
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0,0,w,h);
+
+    // sky
+    const g = ctx.createLinearGradient(0,0,0,h);
+    g.addColorStop(0,'#9ad6ff'); g.addColorStop(0.5,'#6fb8ff'); g.addColorStop(1,'#1b2740');
+    ctx.fillStyle = g; ctx.fillRect(0,0,w,h);
+
+    // pipes
+    for(const p of pipes){
+      const px = p.x * w;
+      const pW = pipeWidth * w;
+      const gapYpx = p.gapY * h;
+      const gapHpx = p.gapH * h;
+      ctx.fillStyle = '#0b6b32';
+      roundRect(px - pW/2, 0, pW, gapYpx - gapHpx/2, 8);
+      roundRect(px - pW/2, gapYpx + gapHpx/2, pW, h - (gapYpx + gapHpx/2), 8);
+      // rims
+      ctx.fillStyle = 'rgba(255,255,255,0.06)'; ctx.fillRect(px - pW/2, gapYpx - gapHpx/2 - 6, pW, 6); ctx.fillRect(px - pW/2, gapYpx + gapHpx/2, pW, 6);
+    }
+
+    // coins
+    for(const c of coins){
+      if(c.collected) continue;
+      const cx = c.x * w, cy = c.y * h, cr = c.r * Math.min(w,h);
+      // simple coin: circle + shine
+      ctx.beginPath(); ctx.fillStyle = '#ffd166'; ctx.arc(cx, cy, cr, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.fillStyle = 'rgba(255,255,255,0.25)'; ctx.arc(cx - cr*0.25, cy - cr*0.25, cr*0.45, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.fillStyle = 'rgba(0,0,0,0.12)'; ctx.arc(cx + cr*0.25, cy + cr*0.18, cr*0.35, 0, Math.PI*2); ctx.fill();
+    }
+
+    // bird draw
+    const bx = bird.x * w, by = bird.y * h, br = bird.radius * Math.min(w,h);
+    ctx.beginPath(); ctx.fillStyle = '#ffd166'; ctx.ellipse(bx, by, br*1.1, br, 0, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.fillStyle = '#222'; ctx.arc(bx + br*0.25, by - br*0.15, br*0.18, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.fillStyle = '#ff9f43'; ctx.moveTo(bx + br*0.9, by); ctx.lineTo(bx + br*1.6, by - br*0.2); ctx.lineTo(bx + br*1.6, by + br*0.2); ctx.closePath(); ctx.fill();
+  }
+
+  function roundRect(x,y,w,h,r){ const radius = Math.min(r,w/2,h/2); ctx.beginPath(); ctx.moveTo(x+radius,y); ctx.arcTo(x+w,y,x+w,y+h,radius); ctx.arcTo(x+w,y+h,x,y+h,radius); ctx.arcTo(x,y+h,x,y,radius); ctx.arcTo(x,y,x+w,y,radius); ctx.closePath(); ctx.fill(); }
+
+  // main loop
+  function loop(ts){
+    if(!lastTime) lastTime = ts;
+    const dt = Math.min(40, ts - lastTime);
+    lastTime = ts;
+    if(!paused && running){
+      update(dt); draw();
+    } else { draw(); }
+    if(running && !paused) requestAnimationFrame(loop);
+  }
+
+  // replay save & play
+  function downloadReplayJSON(){
+    if(!lastReplayJSON){
+      alert('No replay available yet. Play a run first (it auto-records).');
+      return;
+    }
+    const blob = new Blob([lastReplayJSON], {type:'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = `flappy_replay_${new Date().toISOString().replace(/[:.]/g,'-')}.json`; document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  // playLastReplay: will simulate flaps from lastReplayJSON
+  async function playLastReplay(){
+    let json = lastReplayJSON;
+    if(!json){
+      alert('No replay saved yet. Play a run first.');
+      return;
+    }
+    // parse and simulate
+    const data = JSON.parse(json);
+    // reset view
+    running = true; paused = false; overlay.style.display='none';
+    bird.x = 0.28; bird.y = 0.5; bird.vy = 0;
+    score = 0; coinsCollectedThisRun = 0; scoreEl.textContent = score; coinsEl.textContent = coinsCollectedThisRun;
+    pipes = []; coins = []; pipeSpawnTimer = 0; difficulty = 1; spawnInterval = 1400;
+    // replay events
+    const events = data.events || [];
+    // schedule events relative to now
+    const start = performance.now();
+    let evIndex = 0;
+    function replayLoop(ts){
+      const now = performance.now();
+      const t = now - start;
+      // process events up to t
+      while(evIndex < events.length && events[evIndex].t <= t){
+        const e = events[evIndex];
+        if(e.type === 'flap'){ bird.vy = flapImpulse; sfxFlap(); }
+        evIndex++;
+      }
+      // run update/draw
+      update(Math.min(40,16)); draw();
+      if(evIndex < events.length && running) requestAnimationFrame(replayLoop);
+    }
+    // start
+    requestAnimationFrame(replayLoop);
+  }
+
+  // share/save canvas image with overlay score
+  function generateScoreImageAndShare(){
+    // draw extra overlay on a copy canvas
+    const w = canvas.width, h = canvas.height;
+    const copy = document.createElement('canvas'); copy.width = w; copy.height = h;
+    const cctx = copy.getContext('2d');
+    cctx.drawImage(canvas, 0, 0);
+    // overlay box
+    cctx.fillStyle = 'rgba(0,0,0,0.4)';
+    cctx.fillRect(10, h - 110, 260, 96);
+    cctx.fillStyle = '#fff'; cctx.font = '20px Poppins, sans-serif';
+    cctx.fillText(`Score: ${score}`, 26, h - 70);
+    cctx.fillText(`Coins: ${coinsCollectedThisRun}`, 26, h - 42);
+    cctx.fillText(`Level: ${level}`, 26, h - 16);
+    // convert to blob and either share or download
+    copy.toBlob(async (blob) => {
+      if(navigator.canShare && navigator.canShare({files: [new File([blob], 'flappy-score.png', {type:blob.type})]})){
+        try{
+          await navigator.share({files: [new File([blob], 'flappy-score.png', {type:blob.type})], title: 'Flappy Score', text: `My score: ${score} | Coins: ${coinsCollectedThisRun}`});
+        }catch(e){ downloadBlob(blob, `flappy-score-${Date.now()}.png`); }
+      } else {
+        downloadBlob(blob, `flappy-score-${Date.now()}.png`);
+      }
+    }, 'image/png');
+  }
+  function downloadBlob(blob, filename){
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  // helpers & init
+  function spawnInitial(){
+    pipes = []; coins = []; spawnPipe();
+  }
+
+  function init(){ resetGame(); spawnInitial(); lastTime = 0; draw(); }
+  init();
+
+  // unlock audio
+  document.addEventListener('pointerdown', function unlock(){
+    if(audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+    document.removeEventListener('pointerdown', unlock);
+  });
+
+  // expose for debugging
+  window.__flappyAdvanced = { startGame, resetGame, getReplay: ()=> lastReplayJSON };
+})();
+</script>
+
+<!--
+  EXPORT AS APK (instructions) — use one of these wrappers:
+
+  1) Progressive Web App (PWA) -> Convert to Android via Trusted Web Activity:
+     - Add manifest.json and service-worker to make it a PWA.
+     - Use Android Studio & Trusted Web Activity to wrap the PWA, publish to Play Store.
+     - Quick guide: https://developer.android.com/training/app-links/deep-linking
+
+  2) Capacitor (recommended modern):
+     - Install Node & npm. Create simple folder with this index.html.
+     - npm init -y
+     - npm i @capacitor/cli @capacitor/core
+     - npx cap init
+     - Copy web assets into 'www' and run npx cap add android
+     - npx cap open android -> build in Android Studio -> generate signed APK/AAB.
+
+  3) Cordova:
+     - npm i -g cordova
+     - cordova create myapp
+     - copy files into www and cordova platform add android
+     - cordova build android
+
+  4) Thunkable / Kodular:
+     - Use a WebViewer component and host the game online (or paste HTML if platform allows).
+     - Thunkable has "Web API / Web Viewer" approach and can export native apps.
+
+  Notes:
+    - For Play Store you'll need a developer account (₹25 one-time).
+    - For smooth fullscreen & orientation, set proper meta tags and handle WebView settings.
+
+-->
+
+</body>
+</html>
